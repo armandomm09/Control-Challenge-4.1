@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import math
 import numpy as np
 import time
@@ -10,9 +8,7 @@ from sensor_msgs.msg import JointState
 from geometry_msgs.msg import TwistStamped
 from tf2_ros import Buffer, TransformListener
 
-# ==========================================================
-# 1. KINEMATICS & DYNAMICS (xArm Lite 6)
-# ==========================================================
+#kinematics and dynamics (xarm lite 6)
 DH_TABLE =[
     (0.0,    0.2435,   0.0,       0.0),
     (0.0,    0.0,     -np.pi/2,   0.0),
@@ -22,6 +18,7 @@ DH_TABLE =[
     (0.0,    0.0625,  -np.pi/2,   0.0),
 ]
 
+# Forward kinematics using DH parameters
 def compute_fk(q):
     T = np.eye(4)
     for i in range(6):
@@ -66,9 +63,7 @@ def compute_dynamics(q, qd):
     F = np.array([0.5, 0.5, 0.3, 0.2, 0.1, 0.05]) * qd
     return M, Cqd, G, F
 
-# ==========================================================
-# 2. SHADOW CONTROLLERS (Para guardar datos matemáticos)
-# ==========================================================
+#  SHADOW CONTROLLERS
 class ShadowControllers:
     def __init__(self, dt):
         self.dt = dt
@@ -98,9 +93,7 @@ class ShadowControllers:
         tau = M @ v + Cqd + G + F + 5.5 * np.tanh((2.5 * e + ed)/0.002)
         return np.clip(tau, -self.limit, self.limit)
 
-# ==========================================================
-# 3. FIGURE 8 PLANNER & IK
-# ==========================================================
+# rectangular figure 8 planner and IK solver
 class Figure8Planner:
     def __init__(self, hz):
         self.hz = hz
@@ -137,7 +130,7 @@ class Figure8Planner:
                 ts.append(t_curr); p.append(self.wp[i]); pd.append(np.zeros(3)); pdd.append(np.zeros(3))
                 t_curr += self.dt
             
-            # MOVE: Transición al siguiente punto
+            #  Transicion al siguiente punto
             if i < len(self.wp) - 1:
                 w_c, w_n = self.wp[i], self.wp[i+1]
                 for step in range(int(move_sec * self.hz)):
@@ -152,7 +145,7 @@ class Figure8Planner:
         q, qd, qdd = np.zeros((N,6)), np.zeros((N,6)), np.zeros((N,6))
         
         W = np.diag([1.0, 1.0, 2.5])
-        # IK siempre inicia en 0 para evitar que la matemática se rompa
+        # IK siempre inicia en 0 para evitar que la matemática se rompa con singularidades o algo parecido
         q_curr = np.zeros(6) 
         
         for i in range(N):
@@ -173,16 +166,13 @@ class Figure8Planner:
             
         return q, qd, qdd
 
-# ==========================================================
-# 4. ROS 2 NODE (ROBUST RUNNER CON TF2_ROS)
-# ==========================================================
+# ros2 node with tf2_ros 
 class ControlNode(Node):
     def __init__(self):
         super().__init__('xarm_figure8_controller')
         
-        # --- CONFIGURACIÓN DE TU PRUEBA ---
-        self.mode = "ctc" # Cambia a "pid" para pruebas 2 y 4
-        self.perturb_enabled = True # Cambia a True para pruebas 3 y 4
+        self.mode = "ctc" 
+        self.perturb_enabled = True 
         self.trial_name = f"trial_{self.mode}_{'pert' if self.perturb_enabled else 'nopert'}"
         
         self.hz = 50 
@@ -195,14 +185,12 @@ class ControlNode(Node):
         self.sub_joint = self.create_subscription(JointState, '/joint_states', self.joint_cb, 10)
         self.pub_twist = self.create_publisher(TwistStamped, '/servo_server/delta_twist_cmds', 10)
         
-        # TF2 PARA LEER LA POSICIÓN REAL SIN ERRORES MATEMÁTICOS
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         
         self.log = {"time":[], "q":[], "q_des":[], "p":[], "p_des":[], "tau":[]}
         self.is_started = False
         
-        # Esperamos 1 segundo para asegurarnos de tener lecturas de motores
         self.startup_timer = self.create_timer(1.0, self.start_program)
         self.get_logger().info("Iniciando nodo, esperando lectura de motores y TF...")
 
@@ -211,7 +199,7 @@ class ControlNode(Node):
         self.qd_measured = np.array(msg.velocity[:6])
 
     def _read_ee_pose(self):
-        """Lee la posición real del robot desde TF2 (Igual que tus amigos)"""
+        """Lee la posición real del robot desde TF2"""
         try:
             t = self.tf_buffer.lookup_transform("link_base", "link_eef", rclpy.time.Time())
             return np.array([t.transform.translation.x, t.transform.translation.y, t.transform.translation.z])
@@ -227,7 +215,7 @@ class ControlNode(Node):
             self.ts, self.p_des, self.pd_des, _ = planner.generate_task_space()
             self.q_des, self.qd_des, self.qdd_des = planner.solve_ik(self.ts, self.p_des, self.pd_des)
             
-            self.get_logger().info(f"¡Ruta lista! Iniciando {self.trial_name}.")
+            self.get_logger().info(f"ruta lista, Iniciando {self.trial_name}.")
             self.idx = 0
             self.timer = self.create_timer(self.dt, self.control_tick)
             self.is_started = True
@@ -245,27 +233,21 @@ class ControlNode(Node):
         p_r = self.p_des[self.idx]
         pd_r = self.pd_des[self.idx]
         
-        # 1. SHADOW CONTROLLER (Matemática para el reporte)
         if self.mode == "ctc":
             tau = self.controllers.compute_ctc(self.q_measured, self.qd_measured, q_r, qd_r, qdd_r)
         else:
             tau = self.controllers.compute_pid(self.q_measured, self.qd_measured, q_r, qd_r)
             
-        # 2. CONTROL CARTESIANO REAL (Suave y Seguro)
         p_meas = self._read_ee_pose()
         e_task = p_r - p_meas
         J = compute_jacobian(self.q_measured)
         
-        # Ganancias muy gentiles: kp=5.0 (antes 10.0) para que no haya tirones bruscos
         v_cmd = 5.0 * e_task + 0.1 * (pd_r - J @ self.qd_measured) + pd_r
         
-        # LÍMITE SÚPER ESTRICTO DE VELOCIDAD: 0.15 m/s (15 cm/s). 
-        # Esto hace IMPOSIBLE que el robot dé tirones fuertes.
         v_cmd = np.clip(v_cmd, -0.15, 0.15) 
         
         self._publish_twist(v_cmd)
         
-        # 3. Guardar Datos
         self.log["time"].append(self.ts[self.idx])
         self.log["q"].append(self.q_measured.copy())
         self.log["q_des"].append(q_r)
